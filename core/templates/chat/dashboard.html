@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html>
+<head>
+
+<title>Chat Dashboard</title>
+
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+
+<style>
+
+body{
+height:100vh;
+overflow:hidden;
+background:#f0f2f5;
+}
+
+.sidebar{
+height:100vh;
+border-right:1px solid #ddd;
+overflow-y:auto;
+background:white;
+}
+
+.chat-area{
+height:100vh;
+display:flex;
+flex-direction:column;
+background:white;
+}
+
+.chat-messages{
+flex:1;
+overflow-y:auto;
+padding:20px;
+background:#e5ddd5;
+}
+
+.message-box{
+padding:10px;
+border-top:1px solid #ddd;
+background:white;
+}
+
+.user-item{
+cursor:pointer;
+padding:12px;
+border-bottom:1px solid #eee;
+}
+
+.user-item:hover{
+background:#f7f7f7;
+}
+
+.section-title{
+padding:10px;
+font-weight:bold;
+border-bottom:1px solid #ddd;
+background:#fafafa;
+}
+
+.message-sent{
+text-align:right;
+margin-bottom:10px;
+}
+
+.message-received{
+text-align:left;
+margin-bottom:10px;
+}
+
+.message-bubble{
+display:inline-block;
+padding:8px 12px;
+border-radius:10px;
+max-width:70%;
+}
+
+.sent{
+background:#25d366;
+color:white;
+}
+
+.received{
+background:#ffffff;
+}
+
+.time{
+font-size:11px;
+margin-left:8px;
+opacity:0.7;
+}
+
+</style>
+
+</head>
+
+<body>
+
+<div class="container-fluid">
+<div class="row">
+
+<!-- SIDEBAR -->
+
+<div class="col-md-3 sidebar">
+
+<h5 class="p-3 border-bottom">Chats</h5>
+
+<input class="form-control m-2" placeholder="Search users">
+
+<div class="section-title">Friend Requests</div>
+
+{% if received_requests %}
+{% for req in received_requests %}
+
+<div class="user-item">
+<strong>{{ req.sender.full_name }}</strong><br>
+<small>{{ req.sender.email }}</small>
+
+<div class="mt-2">
+<a href="{% url 'accept_request' req.id %}" class="btn btn-success btn-sm">Accept</a>
+<a href="{% url 'reject_request' req.id %}" class="btn btn-danger btn-sm">Reject</a>
+</div>
+</div>
+
+{% endfor %}
+{% else %}
+<div class="p-2 text-muted">
+No pending requests
+</div>
+{% endif %}
+
+<div class="section-title">Recent Chats</div>
+<div id="chat-list"></div>
+
+<button class="btn btn-success m-2 w-90" data-bs-toggle="modal" data-bs-target="#createGroupModal">
+Create Group
+</button>
+
+<div class="section-title">Groups</div>
+<div id="group-list"></div>
+
+</div>
+
+<!-- CHAT AREA -->
+
+<div class="col-md-9 chat-area">
+
+<div class="border-bottom p-3">
+
+<div id="typing-indicator" style="font-size:12px;color:gray;"></div>
+
+<h5 id="chat-username">
+Select a user to start chatting
+</h5>
+
+</div>
+
+<div class="chat-messages" id="chat-messages">
+
+<p class="text-center text-muted mt-5">
+No conversation selected
+</p>
+
+</div>
+
+<div class="message-box">
+
+<div class="input-group">
+
+<input type="file" id="file-input" class="form-control">
+
+<input class="form-control" id="message-input" placeholder="Type message">
+
+<button class="btn btn-success" onclick="sendMessage()">Send</button>
+
+</div>
+
+</div>
+
+</div>
+
+</div>
+</div>
+
+<!-- CREATE GROUP MODAL -->
+
+<div class="modal fade" id="createGroupModal" tabindex="-1">
+
+<div class="modal-dialog">
+
+<div class="modal-content">
+
+<div class="modal-header">
+<h5>Create Group</h5>
+<button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+</div>
+
+<div class="modal-body">
+
+<input type="text" id="group-name" class="form-control mb-3" placeholder="Group Name">
+
+<label>Select Members</label>
+
+<div id="group-members" style="max-height:200px;overflow-y:auto">
+
+{% for user in users %}
+<div>
+<input type="checkbox" value="{{ user.id }}">
+{{ user.full_name }}
+</div>
+{% endfor %}
+
+</div>
+
+</div>
+
+<div class="modal-footer">
+
+<button class="btn btn-primary" onclick="createGroup()">
+Create
+</button>
+
+</div>
+
+</div>
+
+</div>
+
+</div>
+
+
+<script>
+
+let currentUserId = "{{ request.user.id }}";
+let currentUsername = "{{ request.user.username }}";
+
+let selectedUser = null;
+let currentGroupId = null;
+
+let socket = null;
+let groupSocket = null;
+
+const protocol = window.location.protocol === "https:" ? "wss://" : "ws://";
+
+
+function renderMessage(message, sender, time=null){
+
+let chatBox = document.getElementById("chat-messages");
+
+let div = document.createElement("div");
+
+if(sender === currentUsername){
+
+div.className="message-sent";
+
+div.innerHTML=`<span class="message-bubble sent">${message}</span>`;
+
+}else{
+
+div.className="message-received";
+
+div.innerHTML=`<span class="message-bubble received">${message}</span>`;
+
+}
+
+chatBox.appendChild(div);
+
+chatBox.scrollTop = chatBox.scrollHeight;
+
+}
+
+
+/* PRIVATE CHAT */
+
+function openChat(userId, username){
+
+currentGroupId=null;
+selectedUser=userId;
+
+document.getElementById("chat-username").innerText=username;
+
+loadChat(userId);
+
+if(socket){
+socket.close();
+}
+
+let roomName=[currentUserId,selectedUser].sort().join("_");
+
+socket=new WebSocket(protocol+window.location.host+"/ws/chat/"+roomName+"/");
+
+socket.onmessage=function(e){
+
+let data=JSON.parse(e.data);
+
+renderMessage(data.message,data.sender);
+
+};
+
+}
+
+
+function loadChat(userId){
+
+fetch(`/chat/history/${userId}/`)
+.then(res=>res.json())
+.then(data=>{
+
+let chatBox=document.getElementById("chat-messages");
+chatBox.innerHTML="";
+
+data.messages.forEach(msg=>{
+renderMessage(msg.message,msg.sender);
+});
+
+});
+
+}
+
+
+/* GROUP CHAT */
+
+function openGroup(groupId,groupName){
+
+currentGroupId=groupId;
+selectedUser=null;
+
+document.getElementById("chat-username").innerText=groupName;
+
+loadGroupHistory(groupId);
+
+connectGroup(groupId);
+
+}
+
+
+function connectGroup(groupId){
+
+if(groupSocket){
+groupSocket.close();
+}
+
+groupSocket=new WebSocket(protocol+window.location.host+"/ws/group/"+groupId+"/");
+
+groupSocket.onmessage=function(e){
+
+let data=JSON.parse(e.data);
+
+renderMessage(data.message,data.sender);
+
+};
+
+}
+
+
+function loadGroupHistory(groupId){
+
+fetch(`/groups/history/${groupId}/`)
+.then(res=>res.json())
+.then(data=>{
+
+let chatBox=document.getElementById("chat-messages");
+
+chatBox.innerHTML="";
+
+data.messages.forEach(msg=>{
+renderMessage(msg.message,msg.sender);
+});
+
+});
+
+}
+
+
+/* SEND MESSAGE */
+
+function sendMessage(){
+
+let input=document.getElementById("message-input");
+
+let message=input.value.trim();
+
+if(message==="") return;
+
+/* GROUP MESSAGE */
+
+if(currentGroupId){
+
+groupSocket.send(JSON.stringify({
+message:message,
+sender:currentUsername
+}));
+
+input.value="";
+return;
+
+}
+
+/* PRIVATE MESSAGE */
+
+if(!socket) return;
+
+socket.send(JSON.stringify({
+message:message,
+sender:currentUserId,
+receiver:selectedUser
+}));
+
+loadRecentChats();
+
+input.value="";
+
+}
+
+
+/* LOAD GROUPS */
+
+function loadGroups(){
+
+fetch("/groups/my-groups/")
+.then(res=>res.json())
+.then(data=>{
+
+let container=document.getElementById("group-list");
+
+container.innerHTML="";
+
+data.groups.forEach(group=>{
+
+let div=document.createElement("div");
+
+div.className="user-item";
+
+div.innerText=group.name;
+
+div.onclick=()=>openGroup(group.id,group.name);
+
+container.appendChild(div);
+
+});
+
+});
+
+}
+
+
+/* LOAD RECENT CHATS */
+
+function loadRecentChats(){
+
+fetch("/chat/recent-chats/")
+.then(res=>res.json())
+.then(data=>{
+
+let container=document.getElementById("chat-list");
+
+container.innerHTML="";
+
+data.chats.forEach(chat=>{
+
+let div=document.createElement("div");
+
+div.className="user-item";
+
+div.onclick=()=>openChat(chat.user_id,chat.name);
+
+div.innerHTML=`<strong>${chat.name}</strong><br><small>${chat.last_message}</small>`;
+
+container.appendChild(div);
+
+});
+
+});
+
+}
+
+
+/* CREATE GROUP */
+
+function createGroup(){
+
+let name=document.getElementById("group-name").value;
+
+let members=[];
+
+document.querySelectorAll("#group-members input:checked")
+.forEach(cb=>members.push(cb.value));
+
+fetch("/groups/create/",{
+
+method:"POST",
+
+headers:{
+"Content-Type":"application/json",
+"X-CSRFToken":getCookie("csrftoken")
+},
+
+body:JSON.stringify({
+name:name,
+members:members
+})
+
+})
+.then(res=>res.json())
+.then(data=>{
+
+loadGroups();
+
+let modal=bootstrap.Modal.getInstance(
+document.getElementById("createGroupModal")
+);
+
+modal.hide();
+
+});
+
+}
+
+
+function getCookie(name){
+
+let cookieValue=null;
+
+if(document.cookie && document.cookie!==""){
+
+let cookies=document.cookie.split(";");
+
+for(let i=0;i<cookies.length;i++){
+
+let cookie=cookies[i].trim();
+
+if(cookie.substring(0,name.length+1)===(name+"=")){
+
+cookieValue=decodeURIComponent(cookie.substring(name.length+1));
+
+break;
+
+}
+
+}
+
+}
+
+return cookieValue;
+
+}
+
+
+/* INITIAL LOAD */
+
+loadRecentChats();
+loadGroups();
+
+</script>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+
+</body>
+</html>
